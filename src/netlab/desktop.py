@@ -6,7 +6,6 @@ def main() -> int:
     from .bootstrap import run_setup, show_message
 
     if not run_setup():
-        # Setup cancelled or installation launched; exit cleanly.
         return 0
 
     from .cli import main as cli_main
