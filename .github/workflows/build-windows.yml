@@ -1,0 +1,25 @@
+name: Build Windows EXE
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller pytest httpx
+          python -m pip install -e ".[dev,web,desktop]"
+      - name: Run tests
+        run: python -m pytest tests/ -q
+      - name: Build EXE
+        run: python scripts/build.py
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetLab-Windows-Build
+          path: dist/NetLab.exe
