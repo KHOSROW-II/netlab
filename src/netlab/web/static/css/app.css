@@ -447,18 +447,19 @@ select.input optgroup { font-weight: 600; color: var(--text-muted); }
   color: #58a6ff;
 }
 
-/* ===== Splash Screen ===== */
+/* ===== Splash Screen (Neon Red Theme) ===== */
 #splash-screen {
   position: fixed;
   top: 0; left: 0; width: 100vw; height: 100vh;
-  background: #0d1117;
+  /* Dark background with a subtle red radial glow in the center */
+  background: radial-gradient(circle at center, #1a0000 0%, #0d1117 100%);
   z-index: 99999;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   transition: opacity 0.8s ease-out;
-  pointer-events: none; /* Let clicks pass through after fade */
+  pointer-events: none;
 }
 
 #splash-screen.hidden {
@@ -467,55 +468,62 @@ select.input optgroup { font-weight: 600; color: var(--text-muted); }
 
 .splash-logo {
   font-size: 64px;
-  color: #58a6ff;
+  color: #ff003c; /* Neon Red */
+  text-shadow: 0 0 10px #ff003c, 0 0 20px #ff003c, 0 0 40px #ff003c;
   margin-bottom: 10px;
   animation: pulse 2s infinite;
 }
 
 @keyframes pulse {
-  0% { transform: scale(1); opacity: 0.8; }
-  50% { transform: scale(1.1); opacity: 1; }
-  100% { transform: scale(1); opacity: 0.8; }
+  0% { transform: scale(1); opacity: 0.8; text-shadow: 0 0 10px #ff003c, 0 0 20px #ff003c; }
+  50% { transform: scale(1.1); opacity: 1; text-shadow: 0 0 20px #ff003c, 0 0 40px #ff003c, 0 0 60px #ff003c; }
+  100% { transform: scale(1); opacity: 0.8; text-shadow: 0 0 10px #ff003c, 0 0 20px #ff003c; }
 }
 
 .splash-title {
   font-family: var(--sans);
   font-size: 32px;
-  color: #c9d1d9;
+  color: #ffcccc; /* Soft red/pinkish */
   margin: 0 0 16px 0;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.1em;
+  text-shadow: 0 0 5px rgba(255, 0, 60, 0.5);
 }
 
 .splash-brand {
   font-family: var(--mono);
   font-size: 13px;
-  color: #8b949e;
+  color: #cc8888; /* Muted red for the text */
   margin: 0;
 }
 
 .splash-brand a {
-  color: #58a6ff;
+  color: #ff003c; /* Neon red link */
   text-decoration: none;
+  transition: text-shadow 0.3s;
 }
 
 .splash-brand a:hover {
-  text-decoration: underline;
+  text-shadow: 0 0 8px #ff003c;
 }
 
 .splash-studio {
   font-family: var(--mono);
-  font-size: 10px;
-  color: #8b949e;
-  opacity: 0.7;
-  margin-top: 6px;
+  font-size: 11px;
+  /* THIS IS THE NEON RED STUDIO TEXT */
+  color: #ff003c;
+  font-weight: bold;
+  letter-spacing: 0.1em;
+  margin-top: 8px;
+  text-shadow: 0 0 5px #ff003c, 0 0 10px #ff003c, 0 0 20px #ff003c;
 }
 
 .splash-loader {
   margin-top: 32px;
   width: 24px;
   height: 24px;
-  border: 2px solid #30363d;
-  border-top-color: #58a6ff;
+  border: 2px solid #330000; /* Dark red background ring */
+  border-top-color: #ff003c; /* Neon red spinner */
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+  box-shadow: 0 0 10px rgba(255, 0, 60, 0.3);
 }
