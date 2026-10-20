@@ -1,44 +1,37 @@
 """Build a standalone Windows executable with PyInstaller."""
-import shutil
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
 def run(cmd, check=True):
-    print("$", " ".join(cmd))
-    subprocess.run(cmd, check=check)
+    print("$", " ".join(str(c) for c in cmd))
+    result = subprocess.run(cmd, check=check)
+    return result.returncode
 
 
 def main():
     root = Path(__file__).resolve().parent.parent
-    os_target = "windows" if sys.platform == "win32" else sys.platform
 
-    # 1. Ensure build deps are present
-    run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
-    run([sys.executable, "-m", "pip", "install",
-         "pyinstaller", "pytest", "httpx"])
-
-    # 2. Install netlab with web + desktop extras
-    #    On Linux with Python 3.14 proxy_tools may not have a wheel;
-    #    preinstall it without build isolation.
-    try:
-        run([sys.executable, "-m", "pip", "install",
-             "-e", ".[dev,web,desktop]"], check=False)
-    except Exception:
-        pass
-    # If pywebview is missing, install proxy_tools then pywebview --no-deps
+    # 1. Verify dependencies are installed
     try:
         import webview  # noqa: F401
-    except ImportError:
-        run([sys.executable, "-m", "pip", "install", "proxy_tools"], check=False)
-        run([sys.executable, "-m", "pip", "install",
-             "pywebview", "--no-deps"], check=False)
+        import fastapi  # noqa: F401
+        import docker  # noqa: F401
+    except ImportError as exc:
+        print(f"Missing dependency: {exc}", file=sys.stderr)
+        print("Run setup.ps1 first.", file=sys.stderr)
+        return 1
 
-    # 3. Verify tests still pass
-    run([sys.executable, "-m", "pytest", "tests", "-q"], check=False)
+    # 2. Run tests as a gate — never build if they fail
+    print("Running tests before build...")
+    rc = run([sys.executable, "-m", "pytest", "tests", "-q"], check=False)
+    if rc != 0:
+        print("Tests failed. Aborting build.", file=sys.stderr)
+        return rc
 
-    # 4. Run PyInstaller
+    # 3. PyInstaller args
     pkg_src = root / "src" / "netlab"
     add_data = [
         f"{pkg_src / 'web' / 'templates'}{os.pathsep}netlab/web/templates",
@@ -56,8 +49,13 @@ def main():
     ]
     for item in add_data:
         args += ["--add-data", item]
+
     hidden = [
-        "uvicorn", "fastapi", "jinja2", "webview",
+        "uvicorn", "uvicorn.logging", "uvicorn.loops", "uvicorn.loops.auto",
+        "uvicorn.protocols", "uvicorn.protocols.http", "uvicorn.protocols.http.auto",
+        "uvicorn.protocols.websockets", "uvicorn.protocols.websockets.auto",
+        "uvicorn.lifespan", "uvicorn.lifespan.on",
+        "fastapi", "jinja2", "webview", "bottle",
         "netlab.web.app", "netlab.web.routes",
         "netlab.desktop", "netlab.bootstrap",
         "netlab.cli",
@@ -66,12 +64,20 @@ def main():
         args += ["--hidden-import", h]
 
     args.append(str(root / "scripts" / "launcher.py"))
-    run(args)
 
+    # 4. Build
+    rc = run(args, check=False)
+    if rc != 0:
+        print("Build failed.", file=sys.stderr)
+        return rc
+
+    exe_path = root / "dist" / "NetLab.exe"
     print()
-    print(f"Build complete. Find the executable in: {root / 'dist'}")
-    print(f"Target OS: {os_target}")
+    print("=" * 60)
+    print(f"Build complete: {exe_path}")
+    print("=" * 60)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
