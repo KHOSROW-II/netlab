@@ -1,0 +1,27 @@
+name: netlab-editor
+image: nicolaka/netshoot:latest
+groups:
+- name: grpB
+  subnet: 10.10.0.0/24
+  host_count: 5
+  start_offset: 10
+  gateway_offset: 1
+  dns_servers: []
+  search_domains: []
+  topology: ring
+- name: grpD
+  subnet: 10.30.0.0/24
+  host_count: 5
+  start_offset: 10
+  gateway_offset: 1
+  dns_servers: []
+  search_domains: []
+  topology: star
+routers:
+- name: r1
+  connects:
+  - grpB
+  - grpD
+  ip_suffix: 254
+  image: nicolaka/netshoot:latest
+services: []

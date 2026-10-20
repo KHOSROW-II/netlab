@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section id="view-editor" class="view active">
+  <div class="toolbar">
+    <button id="ed-add-group" class="btn btn-primary">+ Group</button>
+    <button id="ed-add-router" class="btn">+ Router</button>
+    <button id="ed-add-service" class="btn">+ Service</button>
+    <span class="toolbar-sep"></span>
+    <button id="ed-delete" class="btn btn-danger">Delete</button>
+    <button id="ed-connect" class="btn" title="Click node A, then node B to connect">Connect</button>
+    <span class="toolbar-sep"></span>
+    <button id="ed-save" class="btn">Save YAML</button>
+    <button id="ed-deploy" class="btn btn-primary">Deploy</button>
+    <button id="ed-force-deploy" class="btn btn-warn">Force deploy</button>
+    <span class="toolbar-sep"></span>
+    <select id="ed-load" class="input input-sm">
+      <option value="">Load…</option>
+      {% for t in topologies %}
+        <option value="{{ t.path }}">{{ t.name }}</option>
+      {% endfor %}
+    </select>
+    <span class="toolbar-spacer"></span>
+    <button id="ed-zoom-out" class="btn btn-sm" title="Zoom out">−</button>
+    <button id="ed-zoom-reset" class="btn btn-sm" title="Reset zoom">1:1</button>
+    <button id="ed-zoom-in" class="btn btn-sm" title="Zoom in">+</button>
+    <input id="ed-name" class="input input-sm" type="text"
+           placeholder="cluster name" value="netlab-editor">
+  </div>
+  <div class="editor-body">
+    <svg id="editor-svg" viewBox="0 0 1200 720" preserveAspectRatio="xMinYMin meet"></svg>
+    <aside id="editor-props" class="props">
+      <p class="muted">Select a node or add a new one.</p>
+    </aside>
+  </div>
+  <div id="editor-status" class="statusbar">Ready.</div>
+</section>
+
+<section id="view-monitor" class="view">
+  <div class="toolbar">
+    <button id="mon-refresh" class="btn">Refresh</button>
+    <button id="mon-validate" class="btn btn-primary"
+            title="Ping every pair on every network — real test">
+      Validate
+    </button>
+    <button id="mon-destroy" class="btn btn-danger">Destroy cluster</button>
+    <span class="toolbar-sep"></span>
+    <button id="mon-zoom-out" class="btn btn-sm">−</button>
+    <button id="mon-zoom-reset" class="btn btn-sm">1:1</button>
+    <button id="mon-zoom-in" class="btn btn-sm">+</button>
+    <span class="toolbar-spacer"></span>
+    <span class="panel-hint">click node · click edge · drag · scroll to zoom</span>
+  </div>
+  <div class="monitor-body">
+    <aside id="monitor-netlist" class="netlist">
+      <p class="muted" style="padding: 12px; font-size: 12px;">loading…</p>
+    </aside>
+    <svg id="monitor-svg" viewBox="0 0 1400 720"
+         preserveAspectRatio="xMinYMin meet"></svg>
+    <aside id="monitor-props" class="props">
+      <p class="muted">Deploy a cluster first.</p>
+    </aside>
+  </div>
+</section>
+
+<section id="view-calculator" class="view">
+  <div class="toolbar">
+    <input id="calc-ip" class="input mono" placeholder="192.168.1.10">
+    <input id="calc-subnet" class="input mono"
+           placeholder="/24 or 255.255.255.0">
+    <button id="calc-analyze" class="btn btn-primary">Analyze</button>
+    <span class="toolbar-spacer"></span>
+    <span class="panel-hint">IP address analysis</span>
+  </div>
+  <div class="calc-body">
+    <div id="calc-result" class="calc-panel">
+      <p class="muted">Enter an IP address and click Analyze.</p>
+    </div>
+  </div>
+  <div class="toolbar">
+    <input id="calc-split-subnet" class="input mono"
+           placeholder="subnet to split (10.0.0.0/16)">
+    <select id="calc-split-mode" class="input input-sm">
+      <option value="count">split by count</option>
+      <option value="prefix">split by prefix</option>
+    </select>
+    <input id="calc-split-value" class="input input-sm" type="number"
+           placeholder="4 or 26">
+    <button id="calc-split" class="btn">Split</button>
+    <span class="toolbar-spacer"></span>
+    <span class="panel-hint">subnet splitting</span>
+  </div>
+  <div class="calc-body">
+    <div id="calc-split-result" class="calc-panel">
+      <p class="muted">Enter a subnet and split parameters.</p>
+    </div>
+  </div>
+</section>
+
+<section id="view-terminal" class="view">
+  <div class="toolbar">
+    <select id="term-host" class="input" size="1"></select>
+    <input id="term-cmd" class="input mono" type="text"
+           placeholder="ping -c 2 10.30.0.20"
+           value="ping -c 2 10.30.0.20">
+    <button id="term-run" class="btn btn-primary">Run</button>
+  </div>
+  <pre id="term-output" class="log tall"></pre>
+</section>
+
+<section id="view-diagnostics" class="view">
+  <div class="toolbar">
+    <button id="diag-check" class="btn">Check</button>
+    <button id="diag-fix" class="btn btn-primary">Check &amp; Fix</button>
+  </div>
+  <pre id="diag-output" class="log tall"></pre>
+</section>
+
+{% endblock %}

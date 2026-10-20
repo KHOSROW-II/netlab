@@ -1,0 +1,23 @@
+name: netlab-demo
+image: nicolaka/netshoot:latest
+
+groups:
+  - name: grpA
+    subnet: 10.10.0.0/24
+    host_count: 3
+    start_offset: 10
+    gateway_offset: 1
+    dns_servers: ["8.8.8.8", "1.1.1.1"]
+    search_domains: ["lab.local"]
+    topology: bus
+
+  - name: grpB
+    subnet: 10.20.0.0/24
+    host_count: 3
+    topology: ring
+
+  - name: grpC
+    subnet: 10.30.0.0/24
+    host_count: 2
+    start_offset: 20
+    topology: star
