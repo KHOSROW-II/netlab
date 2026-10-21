@@ -1,305 +1,77 @@
 """HTTP routes for the NetLab web UI."""
 import contextlib
-import dataclasses
 import io
 import re
 import threading
-from ipaddress import IPv4Network, AddressValueError
+import tempfile
+from ipaddress import IPv4Network
 from pathlib import Path
 from typing import Optional
 
 import docker
 from docker.errors import APIError, NotFound
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from .. import __version__
 from ..cluster import Cluster
 from ..doctor import run_checks, run_fixes
 from ..exceptions import ConfigurationError
 from ..firewall import FirewallManager
-from ..ipam import (
-    IPv4Class, analyze_ipv4, analyze_ipv6,
-    split_by_count, split_subnet,
-)
-from ..topology import (
-    GroupSpec, LabTopology, RouterSpec, ServiceSpec, TopologyType,
-    load_topology,
-)
+from ..ipam import analyze_ipv4, split_by_count
+from ..topology import GroupSpec, LabTopology, RouterSpec, ServiceSpec, TopologyType, load_topology
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-
 router = APIRouter()
+
 _lock = threading.Lock()
 _state: dict = {"topology_file": None, "topology": None}
-_validation_cache: dict = {}
-
-
-# --- helpers ----------------------------------------------------------------
-
-def _project_root() -> Optional[Path]:
-    try:
-        return Path(__file__).resolve().parents[3]
-    except IndexError:
-        return None
+_active_traffic: dict = {}
 
 
 def _discover_topologies() -> list[dict]:
-    results: list[dict] = []
-    seen: set[Path] = set()
-    dirs = [Path.cwd()]
-    root = _project_root()
-    if root and root.exists() and root != Path.cwd():
-        dirs.append(root)
-    for base in dirs:
-        for pattern in ("examples/*.yaml", "examples/*.yml", "*.yaml", "*.yml"):
-            for p in sorted(base.glob(pattern)):
-                try:
-                    key = p.resolve()
-                except OSError:
-                    continue
-                if key in seen:
-                    continue
-                seen.add(key)
+    results, seen = [], set()
+    for pattern in ("examples/*.yaml", "*.yaml"):
+        for p in sorted(Path.cwd().glob(pattern)):
+            if p.resolve() not in seen:
+                seen.add(p.resolve())
                 results.append({"path": str(p), "name": p.stem})
     return results
-
-
-def _container_dict(c) -> dict:
-    net_info = c.attrs.get("NetworkSettings", {}).get("Networks", {})
-    ips = {
-        n: d.get("IPAddress", "")
-        for n, d in net_info.items() if d.get("IPAddress")
-    }
-    return {
-        "name": c.name,
-        "label": c.name.replace("netlab-", ""),
-        "role": c.labels.get("netlab.role", "host"),
-        "group": c.labels.get("netlab.group"),
-        "service": c.labels.get("netlab.service"),
-        "status": c.status,
-        "ips": ips,
-    }
 
 
 def _get_containers(topology_name: Optional[str]):
     try:
         client = docker.from_env()
+        filters = {"label": f"netlab={topology_name}"} if topology_name else {"label": "netlab"}
+        return client.containers.list(all=True, filters=filters)
     except Exception:
         return []
-    filters = (
-        {"label": f"netlab={topology_name}"}
-        if topology_name else {"label": "netlab"}
-    )
-    try:
-        return client.containers.list(all=True, filters=filters)
-    except APIError:
-        return []
-
-
-def _safe_name(name: str) -> str:
-    if not re.match(r"^[a-zA-Z0-9_-]{1,64}$", name):
-        raise HTTPException(
-            status_code=400,
-            detail="Name must be 1-64 chars, letters/digits/dash/underscore",
-        )
-    return name
 
 
 def _nuclear_cleanup() -> tuple[int, int]:
     cr = nr = 0
     try:
         client = docker.from_env()
-    except Exception:
-        return 0, 0
-    try:
         for c in client.containers.list(all=True, filters={"label": "netlab"}):
-            try:
-                c.remove(force=True); cr += 1
-            except Exception:
-                pass
-    except Exception:
-        pass
-    try:
+            try: c.remove(force=True); cr += 1
+            except Exception: pass
         for net in client.networks.list():
-            name = net.name
-            label = net.labels.get("netlab") if net.labels else None
-            if name.startswith("netlab-") or label:
-                try:
-                    net.remove(); nr += 1
-                except Exception:
-                    pass
-    except Exception:
-        pass
+            if net.name.startswith("netlab-"):
+                try: net.remove(); nr += 1
+                except Exception: pass
+    except Exception: pass
     return cr, nr
 
-
-def _read_real_networks(topology_name: Optional[str]) -> dict[str, dict]:
-    out: dict[str, dict] = {}
-    try:
-        client = docker.from_env()
-    except Exception:
-        return out
-    try:
-        if topology_name:
-            nets = client.networks.list(
-                filters={"label": f"netlab={topology_name}"}
-            )
-        else:
-            nets = client.networks.list(filters={"label": "netlab"})
-    except APIError:
-        return out
-    for net in nets:
-        cfg = (net.attrs.get("IPAM", {}).get("Config") or [{}])[0]
-        members = []
-        for cid, cdata in (net.attrs.get("Containers") or {}).items():
-            members.append(cdata.get("Name", cid[:12]))
-        out[net.name] = {
-            "name": net.name,
-            "subnet": cfg.get("Subnet"),
-            "gateway": cfg.get("Gateway"),
-            "driver": net.attrs.get("Driver"),
-            "id": net.id[:12],
-            "members": members,
-        }
-    return out
-
-
-def _read_container_interfaces(container) -> list[dict]:
-    nets = container.attrs.get("NetworkSettings", {}).get("Networks", {})
-    interfaces = []
-    for net_name, data in nets.items():
-        if net_name == "bridge":
-            continue
-        ip = data.get("IPAddress", "")
-        if not ip:
-            continue
-        interfaces.append({
-            "network": net_name,
-            "ip": ip,
-            "prefix": data.get("IPPrefixLen"),
-            "gateway": data.get("Gateway"),
-            "mac": data.get("MacAddress"),
-        })
-    return interfaces
-
-
-# --- editor models ---------------------------------------------------------
-
-class EditorGroup(BaseModel):
-    name: str
-    subnet: str
-    host_count: int = Field(ge=1, le=30)
-    start_offset: int = 10
-    gateway_offset: int = 1
-    topology: str = "bus"
-    dns_servers: list[str] = []
-    search_domains: list[str] = []
-
-
-class EditorRouter(BaseModel):
-    name: str
-    connects: list[str] = []
-    ip_suffix: int = Field(254, ge=2, le=254)
-    image: str = "nicolaka/netshoot:latest"
-
-
-class EditorService(BaseModel):
-    type: str = "dnsmasq"
-    group: str
-    ip_suffix: int = Field(250, ge=2, le=254)
-    upstream: str = "8.8.8.8"
-    dhcp_range: list[int] = Field(default_factory=lambda: [100, 200])
-
-
-class EditorTopology(BaseModel):
-    name: str = "netlab-editor"
-    image: str = "nicolaka/netshoot:latest"
-    groups: list[EditorGroup] = []
-    routers: list[EditorRouter] = []
-    services: list[EditorService] = []
-
-
-def _editor_to_labtopology(e: EditorTopology) -> LabTopology:
-    groups = [
-        GroupSpec(
-            name=g.name, subnet=g.subnet, host_count=g.host_count,
-            start_offset=g.start_offset, gateway_offset=g.gateway_offset,
-            topology=TopologyType(g.topology),
-            dns_servers=tuple(g.dns_servers),
-            search_domains=tuple(g.search_domains),
-        ) for g in e.groups
-    ]
-    routers = [
-        RouterSpec(name=r.name, connects=tuple(r.connects),
-                   ip_suffix=r.ip_suffix, image=r.image) for r in e.routers
-    ]
-    services = [
-        ServiceSpec(type=s.type, group=s.group, ip_suffix=s.ip_suffix,
-                    upstream=s.upstream, dhcp_range=tuple(s.dhcp_range))
-        for s in e.services
-    ]
-    topo = LabTopology(name=e.name, image=e.image,
-                       groups=groups, routers=routers, services=services)
-    topo.validate()
-    return topo
-
-
-def _resolve_subnet(ip: str, subnet: Optional[str]) -> Optional[str]:
-    if not subnet:
-        return None
-    s = subnet.strip()
-    if not s:
-        return None
-    if s.startswith("/"):
-        return ip + s
-    if "/" in s:
-        return s
-    try:
-        prefix = IPv4Network(f"0.0.0.0/{s}").prefixlen
-        return f"{ip}/{prefix}"
-    except Exception:
-        return s
-
-
-def _dc(obj) -> dict:
-    if dataclasses.is_dataclass(obj):
-        out = {}
-        for f in dataclasses.fields(obj):
-            v = getattr(obj, f.name)
-            if isinstance(v, IPv4Class):
-                out[f.name] = v.value
-            elif v is None:
-                out[f.name] = None
-            elif isinstance(v, (str, int, float, bool, list, dict)):
-                out[f.name] = v
-            else:
-                out[f.name] = str(v)
-        return out
-    return obj
-
-
-# --- pages -----------------------------------------------------------------
 
 @router.get("/", response_class=HTMLResponse)
 def index(request: Request):
     return templates.TemplateResponse(
         request=request, name="index.html",
-        context={"version": __version__, "topologies": _discover_topologies()},
+        context={"version": __version__, "topologies": _discover_topologies()}
     )
-
-
-# --- read endpoints --------------------------------------------------------
-# These three were accidentally removed in the previous rewrite.
-# They are required by app.js (refreshStatus, refreshRouting) and by
-# the Editor "Load…" dropdown.
-
-@router.get("/api/topologies")
-def list_topologies():
-    return {"topologies": _discover_topologies()}
 
 
 @router.get("/api/status")
@@ -307,598 +79,264 @@ def get_status():
     topo = _state.get("topology")
     name = topo.name if topo else None
     containers = _get_containers(name)
-    if not name and containers:
-        names = {c.labels.get("netlab") for c in containers
-                 if c.labels.get("netlab")}
-        if len(names) == 1:
-            name = names.pop()
-    groups: dict[str, list] = {}
-    routers: list = []
-    services: list = []
-    placeholders: list = []
+    groups, routers, services, placeholders = {}, [], [], []
+    
     for c in containers:
-        d = _container_dict(c)
-        if d["role"] == "router":
-            routers.append(d)
-        elif d["role"] == "service":
-            services.append(d)
-        elif d["role"] in ("switch", "hub", "ap"):
-            placeholders.append(d)
-        elif d["group"]:
-            groups.setdefault(d["group"], []).append(d)
+        role = c.labels.get("netlab.role", "host")
+        group = c.labels.get("netlab.group")
+        ips = {n: d.get("IPAddress", "") for n, d in c.attrs.get("NetworkSettings", {}).get("Networks", {}).items() if d.get("IPAddress")}
+        d = {"name": c.name, "label": c.name.replace("netlab-", ""), "role": role, "group": group, "service": c.labels.get("netlab.service"), "status": c.status, "ips": ips}
+        if role == "router": routers.append(d)
+        elif role == "service": services.append(d)
+        elif role in ("switch", "hub", "ap", "modem"): placeholders.append(d)
+        elif group: groups.setdefault(group, []).append(d)
+
     return {
         "cluster": name or "(none)",
-        "topology_file": _state.get("topology_file"),
-        "groups": [
-            {"name": g, "containers": sorted(cs, key=lambda c: c["name"])}
-            for g, cs in sorted(groups.items())
-        ],
+        "groups": [{"name": g, "containers": sorted(cs, key=lambda c: c["name"])} for g, cs in sorted(groups.items())],
         "routers": sorted(routers, key=lambda c: c["name"]),
         "services": sorted(services, key=lambda c: c["name"]),
-        "placeholders": sorted(placeholders, key=lambda c: c["name"]),
+        "placeholders": sorted(placeholders, key=lambda c: c["name"])
     }
 
-
-@router.get("/api/routing")
-def routing_status():
-    topo = _state.get("topology")
-    if topo is None:
-        return {"needed": False, "enabled": True, "value": "n/a",
-                "can_fix": False, "hint": ""}
-    fm = FirewallManager(topo)
-    if not fm.has_routers():
-        return {"needed": False, "enabled": True, "value": "n/a",
-                "can_fix": False, "hint": ""}
-    state = fm.state()
-    return {
-        "needed": True,
-        "enabled": state.value == "0",
-        "value": state.value,
-        "can_fix": state.can_change,
-        "hint": state.hint,
-    }
-
-
-# --- graph -----------------------------------------------------------------
 
 @router.get("/api/graph")
 def graph():
     topo = _state.get("topology")
-    name = topo.name if topo else None
-    containers = _get_containers(name)
-    real_nets = _read_real_networks(name)
-
-    # If Docker has no containers, the cluster is gone (destroyed via CLI
-    # or another window). Clear stale state so the UI shows an empty view.
+    topo_name = topo.name if topo else None
+    containers = _get_containers(topo_name)
+    
     if not containers:
         _state["topology"] = None
-        _state["topology_file"] = None
-        return {
-            "cluster": "(none)",
-            "nodes": [],
-            "edges": [],
-            "networks": [],
-            "groups": [],
-        }
+        return {"cluster": "(none)", "nodes": [], "edges": [], "networks": [], "groups": []}
+
+    if not topo_name:
+        names = {c.labels.get("netlab") for c in containers if c.labels.get("netlab")}
+        if len(names) == 1:
+            topo_name = names.pop()
+
+    client = docker.from_env()
+    real_nets = {}
+    nets_filter = {"label": f"netlab={topo_name}"} if topo_name else {"label": "netlab"}
+    try:
+        for net in client.networks.list(filters=nets_filter):
+            cfg = (net.attrs.get("IPAM", {}).get("Config") or [{}])[0]
+            real_nets[net.name] = {"name": net.name, "subnet": cfg.get("Subnet"), "gateway": cfg.get("Gateway")}
+    except Exception:
+        pass
 
     nodes = []
     for c in containers:
-        d = _container_dict(c)
-        ifaces = _read_container_interfaces(c)
-        for iface in ifaces:
-            meta = real_nets.get(iface["network"], {})
-            iface["subnet"] = meta.get("subnet")
-        d["interfaces"] = ifaces
-        nodes.append(d)
+        ips = {n: d.get("IPAddress", "") for n, d in c.attrs.get("NetworkSettings", {}).get("Networks", {}).items() if d.get("IPAddress")}
+        nodes.append({"name": c.name, "label": c.name.replace("netlab-", ""), "role": c.labels.get("netlab.role", "host"), "group": c.labels.get("netlab.group"), "status": c.status, "ips": ips})
 
-    edges: list[dict] = []
-    seen: set[tuple] = set()
+    edges = []
     for net_name, meta in real_nets.items():
-        on_net = [
-            n for n in nodes
-            if any(i["network"] == net_name for i in n["interfaces"])
-        ]
-        if len(on_net) < 2:
-            continue
-        central = next(
-            (n for n in on_net
-             if n["role"] in ("switch", "hub", "ap")),
-            None,
-        )
-        def add_edge(a_name: str, b_name: str):
-            if a_name == b_name:
-                return
-            key = tuple(sorted([a_name, b_name])) + (net_name,)
-            if key in seen:
-                return
-            seen.add(key)
-            edges.append({
-                "id": f"{key[0]}__{key[1]}__{net_name}",
-                "source": a_name,
-                "target": b_name,
-                "kind": "lan",
-                "network": net_name,
-                "subnet": meta.get("subnet"),
-                "gateway": meta.get("gateway"),
-            })
-        if central is not None:
-            for n in on_net:
-                if n["name"] != central["name"]:
-                    add_edge(n["name"], central["name"])
-        else:
-            for i in range(len(on_net)):
-                for j in range(i + 1, len(on_net)):
-                    add_edge(on_net[i]["name"], on_net[j]["name"])
+        on_net = [n for n in nodes if net_name in n["ips"]]
+        if len(on_net) >= 2:
+            central = next((n for n in on_net if n["role"] in ("switch", "hub", "ap", "modem")), None)
+            if central:
+                for n in on_net:
+                    if n["name"] != central["name"]: edges.append({"source": n["name"], "target": central["name"], "network": net_name})
+            else:
+                for i in range(len(on_net)):
+                    for j in range(i+1, len(on_net)):
+                        edges.append({"source": on_net[i]["name"], "target": on_net[j]["name"], "network": net_name})
 
-    # Only return groups that actually have containers in Docker.
     groups_meta = []
-    if topo is not None:
-        for g in topo.groups:
-            has_nodes = any(n.get("group") == g.name for n in nodes)
-            if has_nodes:
-                groups_meta.append({
-                    "name": g.name,
-                    "subnet": g.subnet,
-                    "type": g.topology.value,
-                    "host_count": g.host_count,
-                })
+    if topo:
+        groups_meta = [{"name": g.name, "subnet": g.subnet, "type": g.topology.value} for g in topo.groups]
     else:
-        # No stored topology: rebuild minimal metadata from live containers.
-        live_groups = {n["group"] for n in nodes if n.get("group")}
-        for gname in sorted(live_groups):
-            subnet = None
-            for net_name, meta in real_nets.items():
-                if net_name == f"netlab-{gname}":
-                    subnet = meta.get("subnet")
-                    break
-            groups_meta.append({
-                "name": gname,
-                "subnet": subnet,
-                "type": "unknown",
-                "host_count": sum(1 for n in nodes
-                                  if n.get("group") == gname),
-            })
+        inferred_groups = set(c.labels.get("netlab.group") for c in containers if c.labels.get("netlab.group"))
+        for g_name in inferred_groups:
+            groups_meta.append({"name": g_name, "subnet": "unknown", "type": "unknown"})
 
-    return {
-        "cluster": name or "(none)",
-        "nodes": nodes,
-        "edges": edges,
-        "networks": list(real_nets.values()),
-        "groups": groups_meta,
-    }
+    return {"cluster": topo_name or "(none)", "nodes": nodes, "edges": edges, "networks": list(real_nets.values()), "groups": groups_meta}
 
 
-# --- validation ------------------------------------------------------------
-
-def _container_ip(container, network_name: str) -> Optional[str]:
-    nets = container.attrs.get("NetworkSettings", {}).get("Networks", {})
-    data = nets.get(network_name)
-    return data.get("IPAddress") if data else None
-
-
-def _run_ping(client, src_name: str, target_ip: str) -> tuple[bool, float]:
-    import time
+# --- Calculator API (Fixes the 404) ---
+@router.post("/api/subnet/analyze")
+def subnet_analyze(req: dict):
+    ip, subnet = req.get("ip", "").strip(), req.get("subnet", "").strip() or None
+    if not ip: raise HTTPException(400, detail="IP required")
     try:
-        c = client.containers.get(src_name)
+        info = analyze_ipv4(ip, subnet)
+        return {"kind": "ipv4", "fields": {
+            "address": info.address, "subnet": info.subnet, "class": info.ip_class.value if info.ip_class else "",
+            "prefix": info.prefix_length, "netmask": info.netmask, "network": info.network_address,
+            "broadcast": info.broadcast_address, "first": info.first_usable, "last": info.last_usable,
+            "hosts": info.usable_hosts, "binary": info.binary_address
+        }}
+    except Exception as e:
+        raise HTTPException(400, detail=str(e))
+
+
+# --- Traffic APIs ---
+@router.post("/api/traffic/start")
+def start_traffic(req: dict):
+    source, target = req.get("source"), req.get("target")
+    if not source or not target: raise HTTPException(400, "source and target required")
+    
+    client = docker.from_env()
+    try:
+        src_c = client.containers.get(source)
+        tgt_c = client.containers.get(target)
+    except NotFound: raise HTTPException(404, "Container not found")
+    
+    target_ips = [d.get('IPAddress') for d in tgt_c.attrs['NetworkSettings']['Networks'].values() if d.get('IPAddress')]
+    if not target_ips: raise HTTPException(400, "Target has no IP")
+    target_ip = target_ips[0]
+    
+    tgt_c.exec_run(["sh", "-c", "pkill iperf3; iperf3 -s -D"])
+    src_c.exec_run(["sh", "-c", f"pkill iperf3; iperf3 -c {target_ip} -t 3600 -P 2 > /dev/null 2>&1 &"])
+    
+    _active_traffic[source] = target_ip
+    return {"ok": True}
+
+@router.post("/api/traffic/start_global")
+def start_global_traffic():
+    topo = _state.get("topology")
+    if not topo: raise HTTPException(400, "No active topology")
+    client = docker.from_env()
+    
+    for group in topo.groups:
+        gw_ip = str(IPv4Network(group.subnet).network_address + 1)
+        for i in range(1, group.host_count + 1):
+            h_name = f"netlab-{group.name}-host{i}"
+            try:
+                c = client.containers.get(h_name)
+                c.exec_run(["sh", "-c", f"ping -i 0.5 {gw_ip} > /dev/null 2>&1 &"])
+                _active_traffic[h_name] = gw_ip
+            except: pass
+    return {"ok": True}
+
+@router.post("/api/traffic/stop_all")
+def stop_all_traffic():
+    client = docker.from_env()
+    for source in list(_active_traffic.keys()):
+        try:
+            c = client.containers.get(source)
+            c.exec_run(["pkill", "iperf3"])
+            c.exec_run(["pkill", "ping"])
+        except: pass
+    _active_traffic.clear()
+    return {"ok": True}
+
+@router.get("/api/traffic/status")
+def get_traffic_status():
+    return {"active": _active_traffic}
+
+@router.post("/api/container/{name}/bandwidth")
+def set_bandwidth(name: str, req: dict):
+    limit = req.get("limit", 0)
+    client = docker.from_env()
+    try:
+        c = client.containers.get(name)
+        c.exec_run(["sh", "-c", "for i in eth1 eth2 eth3; do tc qdisc del dev $i root 2>/dev/null || true; done"])
+        if limit > 0:
+            cmd = f"for i in eth1 eth2 eth3; do tc qdisc add dev $i root tbf rate {limit}mbit burst 32kbit latency 400ms 2>/dev/null || true; done"
+            c.exec_run(["sh", "-c", cmd])
+            return {"ok": True, "msg": f"Bandwidth limited to {limit} Mbps"}
+        return {"ok": True, "msg": "Bandwidth unlimited"}
     except NotFound:
-        return False, 0.0
-    t0 = time.time()
-    r = c.exec_run(["ping", "-c", "1", "-W", "2", target_ip])
-    dt = (time.time() - t0) * 1000.0
-    return r.exit_code == 0, round(dt, 2)
+        raise HTTPException(404, "Container not found")
 
 
-@router.post("/api/validate")
-def validate(body: dict):
-    topo = _state.get("topology")
-    name = topo.name if topo else None
-    containers = _get_containers(name)
-    if not containers:
-        return {"tests": [],
-                "summary": {"total": 0, "passed": 0, "failed": 0},
-                "detail": "no containers running"}
-    try:
-        client = docker.from_env()
-    except Exception as exc:
-        raise HTTPException(500, detail=f"Docker unavailable: {exc}")
-
-    real_nets = _read_real_networks(name)
-    target_group = body.get("group") if isinstance(body, dict) else None
-    tests: list[dict] = []
-    for net_name, meta in real_nets.items():
-        if target_group and target_group not in net_name:
-            continue
-        ip_map = {}
-        for c in containers:
-            ip = _container_ip(c, net_name)
-            if ip:
-                ip_map[c.name] = ip
-        names = sorted(ip_map.keys())
-        for i in range(len(names)):
-            for j in range(i + 1, len(names)):
-                a, b = names[i], names[j]
-                ok, rtt = _run_ping(client, a, ip_map[b])
-                tests.append({
-                    "network": net_name,
-                    "from": a, "to": b,
-                    "from_ip": ip_map[a], "to_ip": ip_map[b],
-                    "ok": ok, "rtt_ms": rtt if ok else None,
-                })
-
-    passed = sum(1 for t in tests if t["ok"])
-    _validation_cache[name or ""] = {
-        "tests": tests, "passed": passed, "total": len(tests),
-    }
-    return {
-        "tests": tests,
-        "summary": {"total": len(tests), "passed": passed,
-                    "failed": len(tests) - passed},
-    }
-
-
-@router.get("/api/validate/last")
-def validate_last():
-    topo = _state.get("topology")
-    key = topo.name if topo else ""
-    return _validation_cache.get(
-        key, {"tests": [],
-              "summary": {"total": 0, "passed": 0, "failed": 0}}
-    )
-
-
-# --- editor endpoints ------------------------------------------------------
-
+# --- Editor APIs ---
 @router.post("/api/editor/load")
 def editor_load(body: dict):
     path = body.get("path")
-    if not path:
-        raise HTTPException(400, detail="path required")
-    try:
-        topo = load_topology(path)
-    except ConfigurationError as exc:
-        raise HTTPException(400, detail=str(exc))
+    if not path: raise HTTPException(400, detail="path required")
+    try: topo = load_topology(path)
+    except ConfigurationError as exc: raise HTTPException(400, detail=str(exc))
 
-    nodes: list[dict] = []
-    edges: list[dict] = []
-    y = 80
+    nodes, edges, y = [], [], 100
     for i, g in enumerate(topo.groups):
-        nid = f"group-{i + 1}"
-        net = IPv4Network(g.subnet, strict=False)
-        hosts = [
-            {"index": k,
-             "ip": str(net.network_address + g.start_offset + (k - 1))}
-            for k in range(1, g.host_count + 1)
-        ]
-        nodes.append({
-            "id": nid, "kind": "group", "x": 80, "y": y,
-            "name": g.name, "subnet": g.subnet,
-            "host_count": g.host_count,
-            "start_offset": g.start_offset,
-            "gateway_offset": g.gateway_offset,
-            "topology": g.topology.value,
-            "dns_servers": list(g.dns_servers),
-            "search_domains": list(g.search_domains),
-            "gateway": str(net.network_address + g.gateway_offset),
-            "expected_hosts": hosts,
-        })
-        y += 40 + g.host_count * 16 + 30
-
-    y = 120
-    for i, r in enumerate(topo.routers):
-        nid = f"router-{i + 1}"
-        router_ips = {}
-        for gname in r.connects:
-            gg = topo.group(gname)
-            net = IPv4Network(gg.subnet, strict=False)
-            router_ips[gname] = str(net.network_address + r.ip_suffix)
-        nodes.append({
-            "id": nid, "kind": "router", "x": 420, "y": y,
-            "name": r.name, "ip_suffix": r.ip_suffix, "image": r.image,
-            "expected_ips": router_ips,
-        })
-        for gname in r.connects:
-            for node in nodes:
-                if node["kind"] == "group" and node["name"] == gname:
-                    edges.append({
-                        "from": nid, "to": node["id"], "kind": "route",
-                        "router_ip": router_ips.get(gname),
-                    })
-                    break
-        y += 140
-
-    y = 120
-    for i, s in enumerate(topo.services):
-        nid = f"service-{i + 1}"
-        gg = topo.group(s.group)
-        net = IPv4Network(gg.subnet, strict=False)
-        nodes.append({
-            "id": nid, "kind": "service", "x": 650, "y": y,
-            "type": s.type, "group": s.group,
-            "ip_suffix": s.ip_suffix, "upstream": s.upstream,
-            "dhcp_range": list(s.dhcp_range),
-            "expected_ip": str(net.network_address + s.ip_suffix),
-        })
+        nodes.append({"id": f"group-{i+1}", "type": g.topology.value, "x": 150, "y": y, "name": g.name, "subnet": g.subnet, "host_count": g.host_count})
         y += 100
+    for i, r in enumerate(topo.routers):
+        nodes.append({"id": f"router-{i+1}", "type": "router", "x": 450, "y": 200 + i*100, "name": r.name, "subnet": None})
+        for g in topo.groups:
+            if g.name in r.connects:
+                target = next((n for n in nodes if n["name"] == g.name), None)
+                if target: edges.append({"from": f"router-{i+1}", "to": target["id"]})
+    return {"name": topo.name, "nodes": nodes, "edges": edges}
 
-    return {"name": topo.name, "image": topo.image,
-            "nodes": nodes, "edges": edges}
+@router.post("/api/editor/calculate")
+def editor_calculate(req: dict):
+    nodes, edges = req.get("nodes", []), req.get("edges", [])
+    subnets_seen = []
+    for n in nodes:
+        if n["type"] in ["switch", "hub", "access_point", "modem"]:
+            try:
+                net = IPv4Network(n.get("subnet", "192.168.1.0/24"), strict=False)
+                for s in subnets_seen:
+                    if net.overlaps(s): raise ValueError(f"Subnet {net} overlaps!")
+                subnets_seen.append(net)
+                n["resolved_network"] = str(net.network_address)
+                n["resolved_mask"] = str(net.netmask)
+                n["resolved_gateway"] = str(net.network_address + 1)
+            except Exception as e: raise HTTPException(400, detail=str(e))
 
-
-@router.post("/api/editor/preview")
-def editor_preview(req: EditorTopology):
-    try:
-        topo = _editor_to_labtopology(req)
-    except Exception as exc:
-        raise HTTPException(400, detail=f"Invalid topology: {exc}")
-    preview = {"name": topo.name, "groups": [], "routers": [], "services": []}
-    for g in topo.groups:
-        net = IPv4Network(g.subnet, strict=False)
-        hosts = [
-            {"index": k,
-             "ip": str(net.network_address + g.start_offset + (k - 1))}
-            for k in range(1, g.host_count + 1)
-        ]
-        preview["groups"].append({
-            "name": g.name, "subnet": g.subnet,
-            "gateway": str(net.network_address + g.gateway_offset),
-            "hosts": hosts, "type": g.topology.value,
-        })
-    for r in topo.routers:
-        ips = {}
-        for gname in r.connects:
-            gg = topo.group(gname)
-            net = IPv4Network(gg.subnet, strict=False)
-            ips[gname] = str(net.network_address + r.ip_suffix)
-        preview["routers"].append({
-            "name": r.name, "connects": list(r.connects),
-            "interfaces": ips,
-        })
-    for s in topo.services:
-        gg = topo.group(s.group)
-        net = IPv4Network(gg.subnet, strict=False)
-        preview["services"].append({
-            "type": s.type, "group": s.group,
-            "ip": str(net.network_address + s.ip_suffix),
-        })
-    return preview
-
-
-@router.post("/api/editor/save")
-def editor_save(req: EditorTopology):
-    try:
-        topo = _editor_to_labtopology(req)
-    except Exception as exc:
-        raise HTTPException(400, detail=f"Invalid topology: {exc}")
-    from ..examples import save_topology
-    safe = _safe_name(req.name)
-    out_dir = Path.cwd() / "examples"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{safe}.yaml"
-    try:
-        save_topology(topo, str(path))
-    except Exception as exc:
-        raise HTTPException(500, detail=str(exc))
-    return {"ok": True, "path": str(path)}
-
+    pc_counter = {}
+    for n in nodes:
+        if n["type"] == "pc":
+            parent_edge = next((e for e in edges if e["from"] == n["id"] or e["to"] == n["id"]), None)
+            if parent_edge:
+                parent_id = parent_edge["to"] if parent_edge["from"] == n["id"] else parent_edge["from"]
+                parent = next((x for x in nodes if x["id"] == parent_id), None)
+                if parent and parent.get("resolved_network"):
+                    base = int(IPv4Network(parent["subnet"]).network_address)
+                    count = pc_counter.get(parent["id"], 0)
+                    pc_counter[parent["id"]] = count + 1
+                    n["resolved_ip"] = str(base + 10 + count)
+    return {"nodes": nodes, "edges": edges}
 
 @router.post("/api/editor/deploy")
-def editor_deploy(req: EditorTopology):
-    try:
-        topo = _editor_to_labtopology(req)
-    except Exception as exc:
-        raise HTTPException(400, detail=f"Invalid topology: {exc}")
+def editor_deploy(req: dict):
+    groups = [GroupSpec(name=g["name"], subnet=g["subnet"], host_count=g.get("host_count", 1), topology=TopologyType(g["topology"])) for g in req.get("groups", [])]
+    routers = [RouterSpec(name=r["name"], connects=tuple(r["connects"]), ip_suffix=254) for r in req.get("routers", [])]
+    topo = LabTopology(name=req.get("name", "editor"), groups=groups, routers=routers, services=[])
+    try: topo.validate()
+    except ConfigurationError as exc: raise HTTPException(400, detail=str(exc))
+
     with _lock:
-        try:
-            Cluster(topo).deploy(allow_routing=True)
-        except ConfigurationError as exc:
-            raise HTTPException(409, detail=str(exc))
-        except Exception as exc:
-            raise HTTPException(500, detail=str(exc))
-    _validation_cache.pop(topo.name, None)
-    return {"ok": True, "cluster": topo.name}
-
-
-@router.post("/api/editor/force-deploy")
-def editor_force_deploy(req: EditorTopology):
-    try:
-        topo = _editor_to_labtopology(req)
-    except Exception as exc:
-        raise HTTPException(400, detail=f"Invalid topology: {exc}")
-    with _lock:
-        removed_c, removed_n = _nuclear_cleanup()
-        try:
-            Cluster(topo).deploy(allow_routing=True)
-        except ConfigurationError as exc:
-            raise HTTPException(409, detail=(
-                f"Cleanup removed {removed_c} containers, "
-                f"{removed_n} networks. Deploy still failed: {exc}"
-            ))
-        except Exception as exc:
-            raise HTTPException(500, detail=(
-                f"Cleanup removed {removed_c} containers, "
-                f"{removed_n} networks. Deploy failed: {exc}"
-            ))
-    _validation_cache.pop(topo.name, None)
-    return {"ok": True, "cluster": topo.name,
-            "cleanup": {"containers": removed_c, "networks": removed_n}}
-
-
-# --- subnet calculator -----------------------------------------------------
-
-@router.post("/api/subnet/analyze")
-def subnet_analyze(req: dict):
-    ip = (req.get("ip") or "").strip()
-    subnet = (req.get("subnet") or "").strip() or None
-    if not ip:
-        raise HTTPException(400, detail="IP address required")
-    try:
-        if ":" in ip:
-            return {"kind": "ipv6", "fields": _dc(analyze_ipv6(ip, subnet))}
-        resolved = _resolve_subnet(ip, subnet)
-        return {"kind": "ipv4", "fields": _dc(analyze_ipv4(ip, resolved))}
-    except ValueError as exc:
-        raise HTTPException(400, detail=str(exc))
-
-
-@router.post("/api/subnet/split")
-def subnet_split(req: dict):
-    subnet = (req.get("subnet") or "").strip()
-    if not subnet:
-        raise HTTPException(400, detail="subnet required")
-    try:
-        count = req.get("count")
-        prefix = req.get("prefix")
-        if count is not None:
-            results = split_by_count(subnet, int(count))
-        elif prefix is not None:
-            results = split_subnet(subnet, int(prefix))
-        else:
-            raise HTTPException(400, detail="provide count or prefix")
-    except ValueError as exc:
-        raise HTTPException(400, detail=str(exc))
-    return {"subnets": [
-        {"network": str(s.network),
-         "first_usable": s.first_usable,
-         "last_usable": s.last_usable,
-         "broadcast": s.broadcast_address,
-         "usable_hosts": s.usable_hosts,
-         "prefix": s.prefix_length,
-         "netmask": s.netmask}
-        for s in results
-    ]}
-
-
-# --- actions ---------------------------------------------------------------
-
-@router.post("/api/deploy")
-def deploy(req: dict):
-    file = req.get("file")
-    if not file:
-        raise HTTPException(400, detail="file required")
-    with _lock:
-        try:
-            topo = load_topology(file)
-        except ConfigurationError as exc:
-            raise HTTPException(400, detail=str(exc))
-        try:
-            Cluster(topo).deploy(allow_routing=True)
-        except ConfigurationError as exc:
-            raise HTTPException(409, detail=str(exc))
-        except Exception as exc:
-            raise HTTPException(500, detail=str(exc))
-        _state["topology_file"] = file
+        try: Cluster(topo).deploy(allow_routing=True)
+        except Exception as exc: raise HTTPException(500, detail=str(exc))
         _state["topology"] = topo
-    _validation_cache.pop(topo.name, None)
     return {"ok": True, "cluster": topo.name}
 
 
 @router.post("/api/destroy")
 def destroy():
-    """Remove ALL netlab containers and networks — not just the active topology.
-
-    This handles the case where the server lost its _state (restart) or
-    the operator destroyed via CLI: the UI must be a reliable panic button.
-    """
     with _lock:
-        removed_c, removed_n = _nuclear_cleanup()
+        _nuclear_cleanup()
         _state["topology"] = None
-        _state["topology_file"] = None
-        _validation_cache.clear()
-    return {
-        "ok": True,
-        "cleanup": {"containers": removed_c, "networks": removed_n},
-    }
+    return {"ok": True}
 
+@router.post("/api/exec")
+def exec_command(req: dict):
+    try:
+        c = docker.from_env().containers.get(req.get("host"))
+        r = c.exec_run(["sh", "-c", req.get("command", "ls")])
+        return {"code": r.exit_code, "output": r.output.decode(errors="ignore")}
+    except Exception as e: raise HTTPException(500, detail=str(e))
+
+@router.post("/api/doctor")
+def doctor(req: dict):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        if req.get("fix"): run_fixes()
+        else: run_checks()
+    return {"ok": True, "output": buf.getvalue()}
 
 @router.post("/api/routing/enable")
 def routing_enable():
     topo = _state.get("topology")
-    if topo is None:
-        raise HTTPException(400, detail="no active topology")
+    if not topo:
+        raise HTTPException(400, detail="Deploy a topology first.")
     fm = FirewallManager(topo)
     state = fm.install()
-    return {"enabled": state.value == "0",
-            "value": state.value, "hint": state.hint}
-
-
-@router.post("/api/exec")
-def exec_command(req: dict):
-    host = req.get("host")
-    command = req.get("command")
-    if not host or not command:
-        raise HTTPException(400, detail="host and command required")
-    if not host.startswith("netlab-"):
-        raise HTTPException(400, detail="invalid host name")
-    try:
-        c = docker.from_env().containers.get(host)
-    except NotFound:
-        raise HTTPException(404, detail="container not found")
-    except APIError as exc:
-        raise HTTPException(500, detail=str(exc))
-    try:
-        result = c.exec_run(["sh", "-c", command])
-    except APIError as exc:
-        raise HTTPException(500, detail=str(exc))
-    return {"code": result.exit_code,
-            "output": result.output.decode(errors="ignore")}
-
-
-@router.post("/api/container/{name}/stop")
-def container_stop(name: str):
-    if not name.startswith("netlab-"):
-        raise HTTPException(400, detail="invalid name")
-    try:
-        c = docker.from_env().containers.get(name)
-        c.stop(timeout=3)
-    except NotFound:
-        raise HTTPException(404, detail="not found")
-    except APIError as exc:
-        raise HTTPException(500, detail=str(exc))
+    if state.value != "0":
+        raise HTTPException(403, detail=f"Failed to disable br_netfilter. Are you running as root? Hint: {state.hint}")
     return {"ok": True}
-
-
-@router.post("/api/container/{name}/start")
-def container_start(name: str):
-    if not name.startswith("netlab-"):
-        raise HTTPException(400, detail="invalid name")
-    try:
-        c = docker.from_env().containers.get(name)
-        c.start()
-    except NotFound:
-        raise HTTPException(404, detail="not found")
-    except APIError as exc:
-        raise HTTPException(500, detail=str(exc))
-    return {"ok": True}
-
-
-@router.post("/api/container/{name}/logs")
-def container_logs(name: str):
-    if not name.startswith("netlab-"):
-        raise HTTPException(400, detail="invalid name")
-    try:
-        c = docker.from_env().containers.get(name)
-        logs = c.logs(tail=50).decode(errors="ignore")
-    except NotFound:
-        raise HTTPException(404, detail="not found")
-    except APIError as exc:
-        raise HTTPException(500, detail=str(exc))
-    return {"output": logs}
-
-
-@router.post("/api/doctor")
-def doctor(req: dict):
-    fix = bool(req.get("fix"))
-    file = req.get("file")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        if fix:
-            topo = None
-            if file:
-                try:
-                    topo = load_topology(file)
-                except ConfigurationError as exc:
-                    return {"ok": False, "output": str(exc)}
-            run_fixes(topo)
-        else:
-            run_checks()
-    return {"ok": True, "output": buf.getvalue()}

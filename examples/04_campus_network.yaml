@@ -1,0 +1,24 @@
+name: campus-network
+groups:
+  - name: Science_Dept
+    subnet: 10.15.0.0/24
+    host_count: 8
+    topology: switch
+  - name: Arts_Dept
+    subnet: 10.25.0.0/24
+    host_count: 8
+    topology: switch
+  - name: Library
+    subnet: 10.35.0.0/24
+    host_count: 4
+    topology: access_point
+  - name: Campus_Backbone
+    subnet: 10.0.0.0/24
+    host_count: 2
+routers:
+  - name: Science_Router
+    connects: [Science_Dept, Campus_Backbone]
+  - name: Arts_Router
+    connects: [Arts_Dept, Campus_Backbone]
+  - name: Library_Router
+    connects: [Library, Campus_Backbone]

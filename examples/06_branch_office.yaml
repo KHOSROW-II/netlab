@@ -1,0 +1,14 @@
+name: branch-office
+groups:
+  - name: HQ_Network
+    subnet: 10.100.1.0/24
+    host_count: 6
+  - name: Branch1_Network
+    subnet: 10.200.1.0/24
+    host_count: 4
+  - name: Branch2_Network
+    subnet: 10.200.2.0/24
+    host_count: 4
+routers:
+  - name: HQ_Router
+    connects: [HQ_Network, Branch1_Network, Branch2_Network]

@@ -1,0 +1,22 @@
+name: hospital-network
+groups:
+  - name: ER_Subnet
+    subnet: 10.50.1.0/24
+    host_count: 6
+    topology: ring
+  - name: Wards_Subnet
+    subnet: 10.50.2.0/24
+    host_count: 10
+  - name: Admin_Subnet
+    subnet: 10.50.3.0/24
+    host_count: 4
+  - name: Med_Backbone
+    subnet: 10.50.0.0/24
+    host_count: 2
+routers:
+  - name: ER_Router
+    connects: [ER_Subnet, Med_Backbone]
+  - name: Ward_Router
+    connects: [Wards_Subnet, Med_Backbone]
+  - name: Admin_Router
+    connects: [Admin_Subnet, Med_Backbone]

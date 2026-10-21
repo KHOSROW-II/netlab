@@ -1,0 +1,25 @@
+name: enterprise-hq
+groups:
+  - name: HR_Subnet
+    subnet: 10.10.10.0/24
+    host_count: 5
+    topology: switch
+  - name: IT_Subnet
+    subnet: 10.10.20.0/24
+    host_count: 5
+    topology: switch
+  - name: DMZ_Subnet
+    subnet: 192.168.100.0/24
+    host_count: 2
+    topology: switch
+  - name: Core_Transit
+    subnet: 172.16.0.0/24
+    host_count: 1
+routers:
+  - name: CoreRouter
+    connects: [HR_Subnet, IT_Subnet, Core_Transit]
+  - name: EdgeRouter
+    connects: [DMZ_Subnet, Core_Transit]
+services:
+  - type: dnsmasq
+    group: DMZ_Subnet

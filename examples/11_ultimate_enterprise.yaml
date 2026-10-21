@@ -1,0 +1,52 @@
+name: ultimate-enterprise
+groups:
+  # --- CORE DATA CENTER (Servers) ---
+  - name: DC_Servers
+    subnet: 10.100.0.0/24
+    host_count: 6
+    topology: switch
+  - name: DC_Storage
+    subnet: 10.100.1.0/24
+    host_count: 4
+    topology: switch
+
+  # --- MAIN OFFICE (Employee Workstations) ---
+  - name: Office_Floor1
+    subnet: 10.1.0.0/24
+    host_count: 8
+    topology: star
+  - name: Office_Floor2
+    subnet: 10.2.0.0/24
+    host_count: 6
+    topology: bus
+
+  # --- RESEARCH LAB (Changed to Switch for Router connection) ---
+  - name: Lab_Network
+    subnet: 10.50.0.0/24
+    host_count: 4
+    topology: switch
+
+  # --- IOT & CAMERAS (Security) ---
+  - name: IoT_Cameras
+    subnet: 172.16.0.0/24
+    host_count: 5
+    topology: hub
+
+  # --- GUEST WIFI ---
+  - name: Guest_WiFi
+    subnet: 192.168.100.0/24
+    host_count: 4
+    topology: access_point
+
+routers:
+  # --- CORE ROUTER (Handles DC and Office) ---
+  - name: Core_Router
+    connects: [DC_Servers, DC_Storage, Office_Floor1, Office_Floor2]
+  
+  # --- EDGE ROUTER (Handles Lab, IoT, and WiFi) ---
+  - name: Edge_Router
+    connects: [Lab_Network, IoT_Cameras, Guest_WiFi, Office_Floor1]
+
+services:
+  - type: dnsmasq
+    group: DC_Servers

@@ -1,0 +1,16 @@
+name: isp-network
+groups:
+  - name: POP1_Customers
+    subnet: 192.168.10.0/24
+    host_count: 10
+  - name: POP2_Customers
+    subnet: 192.168.20.0/24
+    host_count: 10
+  - name: ISP_Backbone
+    subnet: 10.255.0.0/24
+    host_count: 2
+routers:
+  - name: POP1_Router
+    connects: [POP1_Customers, ISP_Backbone]
+  - name: POP2_Router
+    connects: [POP2_Customers, ISP_Backbone]

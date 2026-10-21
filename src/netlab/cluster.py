@@ -18,8 +18,7 @@ class Cluster:
     def __init__(self, topology: LabTopology) -> None:
         self.topology = topology
         self._client = docker.from_env()
-
-    # ------------------------------------------------------------------ helpers
+        self._deployed_routers = {}
 
     def _make_group(self, group_name: str) -> Group:
         spec = self.topology.group(group_name)
@@ -39,8 +38,6 @@ class Cluster:
             spec=service_spec, client=self._client,
             topology=self.topology, cluster_name=self.topology.name,
         )
-
-    # ------------------------------------------------------------------ deploy
 
     def deploy(self, allow_routing: bool = False) -> None:
         if allow_routing:
@@ -81,177 +78,86 @@ class Cluster:
             )
 
     def _deploy_routers(self) -> None:
+        used_ips = {} 
         for router_spec in self.topology.routers:
+            suffix_map = {}
+            for net in router_spec.connects:
+                net_name = f"netlab-{net}"
+                if net_name not in used_ips:
+                    used_ips[net_name] = set()
+                suffix = router_spec.ip_suffix
+                while suffix in used_ips[net_name]:
+                    suffix -= 1
+                used_ips[net_name].add(suffix)
+                suffix_map[net] = suffix
+            
             try:
-                self._make_router(router_spec).deploy()
+                router = self._make_router(router_spec)
+                router.deploy(suffix_map)
+                self._deployed_routers[router_spec.name] = router
             except Exception as exc:
-                logger.error(
-                    "Router %s failed to deploy: %s", router_spec.name, exc
-                )
+                logger.error("Router %s failed to deploy: %s", router_spec.name, exc)
                 raise
 
     def _apply_router_routes_to_hosts(self) -> None:
-        host_mgr = HostManager(
-            self._client, image=self.topology.image,
-            label=self.topology.name,
-        )
+        host_mgr = HostManager(self._client, image=self.topology.image, label=self.topology.name)
         for router_spec in self.topology.routers:
-            router = self._make_router(router_spec)
+            router = self._deployed_routers.get(router_spec.name)
+            if not router: continue
             for group_name in router_spec.connects:
                 gateway_ip = router.host_default_gateway(group_name)
                 spec = self.topology.group(group_name)
                 if spec.topology == TopologyType.RING:
-                    logger.info(
-                        "Skipping default-route injection for ring group %s",
-                        group_name,
-                    )
                     continue
                 for idx in range(1, spec.host_count + 1):
                     host_name = f"netlab-{group_name}-host{idx}"
                     try:
                         host_mgr.set_default_route(host_name, gateway_ip)
                     except Exception as exc:
-                        logger.warning(
-                            "Could not route %s via %s: %s",
-                            host_name, gateway_ip, exc,
-                        )
+                        logger.warning("Could not route %s via %s: %s", host_name, gateway_ip, exc)
 
     def _deploy_services(self) -> None:
         for svc_spec in self.topology.services:
             try:
                 self._make_service(svc_spec).deploy()
             except Exception as exc:
-                logger.error(
-                    "Service %s on %s failed to deploy: %s",
-                    svc_spec.type, svc_spec.group, exc,
-                )
-
-    # ------------------------------------------------------------------ destroy
+                logger.error("Service %s on %s failed: %s", svc_spec.type, svc_spec.group, exc)
 
     def destroy(self) -> None:
-        """Remove containers and networks for this cluster.
-
-        Also catches orphans that were created by older code without the
-        netlab=<cluster> label, by matching the `netlab-<cluster>-` name
-        prefix in addition to the label filter.
-        """
-        # 1. Containers by label
+        self._deployed_routers = {}
         try:
-            containers = self._client.containers.list(
-                all=True, filters={"label": f"netlab={self.topology.name}"}
-            )
+            containers = self._client.containers.list(all=True, filters={"label": f"netlab={self.topology.name}"})
             for c in containers:
-                try:
-                    c.remove(force=True)
-                except Exception as exc:
-                    logger.warning("Could not remove %s: %s", c.name, exc)
-        except Exception as exc:
-            logger.warning("Container cleanup (label) failed: %s", exc)
+                try: c.remove(force=True)
+                except Exception: pass
+        except Exception: pass
 
-        # 2. Containers by name prefix (orphans without labels)
         try:
-            all_containers = self._client.containers.list(all=True)
-            for c in all_containers:
-                if not c.name.startswith("netlab-"):
-                    continue
-                # Skip containers belonging to a DIFFERENT cluster
-                lbl = (c.labels or {}).get("netlab")
-                if lbl and lbl != self.topology.name:
-                    continue
-                # Remove if it belongs to this cluster by name or label
-                own_prefix = f"netlab-{self.topology.name}"
-                if c.name == own_prefix or c.name.startswith(own_prefix + "-"):
-                    try:
-                        c.remove(force=True)
-                    except Exception:
-                        pass
-        except Exception as exc:
-            logger.warning("Container cleanup (prefix) failed: %s", exc)
-
-        # 3. Networks by label
-        try:
-            networks = self._client.networks.list(
-                filters={"label": f"netlab={self.topology.name}"}
-            )
+            networks = self._client.networks.list(filters={"label": f"netlab={self.topology.name}"})
             for net in networks:
-                try:
-                    net.remove()
-                except Exception as exc:
-                    logger.warning(
-                        "Could not remove network %s: %s", net.name, exc
-                    )
-        except Exception as exc:
-            logger.warning("Network cleanup (label) failed: %s", exc)
-
-        # 4. Networks by name prefix (orphans without labels)
+                try: net.remove()
+                except Exception: pass
+        except Exception: pass
+        
         try:
-            all_networks = self._client.networks.list()
-            own_prefix = f"netlab-{self.topology.name}"
-            for net in all_networks:
-                if not net.name.startswith(own_prefix):
-                    continue
-                try:
+            for c in self._client.containers.list(all=True):
+                if c.name.startswith(f"netlab-{self.topology.name}-") or c.name == f"netlab-{self.topology.name}":
+                    c.remove(force=True)
+            for net in self._client.networks.list():
+                if net.name.startswith(f"netlab-{self.topology.name}"):
                     net.remove()
-                except Exception:
-                    pass
-        except Exception as exc:
-            logger.warning("Network cleanup (prefix) failed: %s", exc)
-
-    # ------------------------------------------------------------------ firewall
-
-    def firewall_install(self) -> FirewallState:
-        fm = FirewallManager(self.topology)
-        if not fm.has_routers():
-            logger.info("No routers; br_netfilter unchanged.")
-            return fm.state()
-        state = fm.install()
-        if state.needs_change and not state.can_change:
-            logger.warning(
-                "br_netfilter is enabled (%s=1) but this process is not root. "
-                "Cross-group routing will fail until you run:", SYSCTL_KEY,
-            )
-            for cmd in fm.persist_commands():
-                logger.warning("  %s", cmd)
-        elif state.value == "0":
-            logger.info(
-                "br_netfilter disabled; cross-group routing is enabled."
-            )
-        return state
-
-    def firewall_status(self) -> None:
-        fm = FirewallManager(self.topology)
-        state = fm.state()
-        print(f"Cluster      : {self.topology.name}")
-        print(f"Routers      : {len(self.topology.routers)}")
-        print(f"{SYSCTL_KEY} : {state.value}")
-        print(f"Needs change : {state.needs_change}")
-        if state.needs_change and not state.can_change:
-            print()
-            print("To enable cross-group routing, run:")
-            for cmd in fm.persist_commands():
-                print(f"  {cmd}")
-
-    def firewall_revoke(self) -> FirewallState:
-        return FirewallManager(self.topology).uninstall()
-
-    # ------------------------------------------------------------------ host ops
+        except Exception: pass
 
     def _resolve_hosts(self, group_name: str, host_spec: str) -> list[str]:
         spec = self.topology.group(group_name)
         if host_spec == "all":
             indices = list(range(1, spec.host_count + 1))
         else:
-            try:
-                indices = [int(x) for x in host_spec.split(",")]
-            except ValueError as exc:
-                raise ConfigurationError(
-                    f"Invalid host selector '{host_spec}'"
-                ) from exc
+            try: indices = [int(x) for x in host_spec.split(",")]
+            except ValueError as exc: raise ConfigurationError(f"Invalid host selector '{host_spec}'")
         for idx in indices:
             if not (1 <= idx <= spec.host_count):
-                raise ConfigurationError(
-                    f"Host index {idx} out of range for group '{group_name}'"
-                )
+                raise ConfigurationError(f"Host index {idx} out of range for group '{group_name}'")
         return [f"netlab-{group_name}-host{i}" for i in indices]
 
     def exec(self, group_name: str, host_spec: str, cmd: list[str]) -> int:
@@ -261,16 +167,13 @@ class Cluster:
         for host_name in host_names:
             print(f"[{host_name}] $ {' '.join(cmd)}")
             code, output = group.exec(host_name, cmd)
-            if output:
-                print(output.rstrip())
+            if output: print(output.rstrip())
             if code != 0:
                 print(f"[{host_name}] exit code {code}")
                 overall = code
         return overall
 
-    def set_dns(self, group_name: str, host_spec: str,
-                servers: list[str],
-                search_domains: list[str] | None = None) -> None:
+    def set_dns(self, group_name: str, host_spec: str, servers: list[str], search_domains: list[str] | None = None) -> None:
         host_names = self._resolve_hosts(group_name, host_spec)
         group = self._make_group(group_name)
         for host_name in host_names:
@@ -280,24 +183,33 @@ class Cluster:
     def set_ip(self, group_name: str, host_index: int, new_ip: str) -> None:
         spec = self.topology.group(group_name)
         if spec.topology == TopologyType.RING:
-            raise ConfigurationError(
-                "set-ip is not supported on ring topology groups"
-            )
+            raise ConfigurationError("set-ip is not supported on ring topology groups")
         host_name = f"netlab-{group_name}-host{host_index}"
         self._make_group(group_name).set_ip(host_name, new_ip)
         print(f"[{host_name}] IP updated to {new_ip}")
 
-    # ------------------------------------------------------------------ status
+    def firewall_install(self) -> FirewallState:
+        fm = FirewallManager(self.topology)
+        if not fm.has_routers(): return fm.state()
+        return fm.install()
+
+    def firewall_status(self) -> None:
+        fm = FirewallManager(self.topology)
+        state = fm.state()
+        print(f"Cluster      : {self.topology.name}")
+        print(f"Routers      : {len(self.topology.routers)}")
+        print(f"{SYSCTL_KEY} : {state.value}")
+        print(f"Needs change : {state.needs_change}")
+
+    def firewall_revoke(self) -> FirewallState:
+        return FirewallManager(self.topology).uninstall()
 
     def status(self) -> None:
-        containers = self._client.containers.list(
-            all=True, filters={"label": f"netlab={self.topology.name}"}
-        )
-        by_group: dict[str, list] = {}
+        containers = self._client.containers.list(all=True, filters={"label": f"netlab={self.topology.name}"})
+        by_group = {}
         for c in containers:
             group_name = c.labels.get("netlab.group")
-            if group_name:
-                by_group.setdefault(group_name, []).append(c)
+            if group_name: by_group.setdefault(group_name, []).append(c)
 
         print(f"Cluster     : {self.topology.name}")
         print(f"Image       : {self.topology.image}")
@@ -306,31 +218,21 @@ class Cluster:
         print(f"Services    : {len(self.topology.services)}")
         print("=" * 68)
         for spec in self.topology.groups:
-            print(
-                f"Group {spec.name} ({spec.subnet}, "
-                f"{spec.topology.value}, {spec.host_count} hosts)"
-            )
+            print(f"Group {spec.name} ({spec.subnet}, {spec.topology.value}, {spec.host_count} hosts)")
             cs = sorted(by_group.get(spec.name, []), key=lambda c: c.name)
-            if not cs:
-                print("  (no running containers)")
+            if not cs: print("  (no running containers)")
             for c in cs:
                 nets = c.attrs.get("NetworkSettings", {}).get("Networks", {})
-                ips = ", ".join(
-                    f"{n}={d.get('IPAddress', '')}" for n, d in nets.items()
-                )
+                ips = ", ".join(f"{n}={d.get('IPAddress', '')}" for n, d in nets.items())
                 role = c.labels.get("netlab.role", "host")
-                if c.labels.get("netlab.service"):
-                    role += f":{c.labels['netlab.service']}"
+                if c.labels.get("netlab.service"): role += f":{c.labels['netlab.service']}"
                 print(f"  {c.name:<32} {role:<16} {c.status:<10} {ips}")
             print()
 
-        routers = [c for c in containers
-                   if c.labels.get("netlab.role") == "router"]
+        routers = [c for c in containers if c.labels.get("netlab.role") == "router"]
         if routers:
             print("Routers:")
             for c in sorted(routers, key=lambda c: c.name):
                 nets = c.attrs.get("NetworkSettings", {}).get("Networks", {})
-                ips = ", ".join(
-                    f"{n}={d.get('IPAddress', '')}" for n, d in nets.items()
-                )
+                ips = ", ".join(f"{n}={d.get('IPAddress', '')}" for n, d in nets.items())
                 print(f"  {c.name:<32} {c.status:<10} {ips}")

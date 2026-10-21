@@ -16,14 +16,14 @@ class TopologyType(str, Enum):
     SWITCH = "switch"
     HUB = "hub"
     ACCESS_POINT = "access_point"
+    MODEM = "modem"
 
 
-# Topology types that share a single Docker bridge with a placeholder
-# device container (visible in `docker ps` and in the graph).
 PLACEHOLDER_KINDS = {
     TopologyType.SWITCH: "switch",
     TopologyType.HUB: "hub",
     TopologyType.ACCESS_POINT: "ap",
+    TopologyType.MODEM: "modem",
 }
 
 
@@ -50,9 +50,7 @@ class GroupSpec:
                 f"Group '{self.name}': invalid subnet '{self.subnet}': {exc}"
             ) from exc
         if self.host_count <= 0:
-            raise ConfigurationError(
-                f"Group '{self.name}': host_count must be > 0"
-            )
+            raise ConfigurationError(f"Group '{self.name}': host_count must be > 0")
         if self.topology == TopologyType.RING and self.host_count < 3:
             raise ConfigurationError(
                 f"Group '{self.name}': ring topology requires at least 3 hosts"
@@ -74,13 +72,9 @@ class RouterSpec:
         if not self.name:
             raise ConfigurationError("Router name cannot be empty")
         if len(self.connects) < 2:
-            raise ConfigurationError(
-                f"Router '{self.name}' must connect to at least 2 groups"
-            )
+            raise ConfigurationError(f"Router '{self.name}' must connect to at least 2 groups")
         if not (2 <= self.ip_suffix <= 254):
-            raise ConfigurationError(
-                f"Router '{self.name}': ip_suffix must be 2..254"
-            )
+            raise ConfigurationError(f"Router '{self.name}': ip_suffix must be 2..254")
 
 
 @dataclass(frozen=True)
@@ -93,19 +87,12 @@ class ServiceSpec:
 
     def validate(self) -> None:
         if self.type not in ("dnsmasq",):
-            raise ConfigurationError(
-                f"Service '{self.type}' is not supported (use: dnsmasq)"
-            )
+            raise ConfigurationError(f"Service '{self.type}' is not supported (use: dnsmasq)")
         if not (2 <= self.ip_suffix <= 254):
-            raise ConfigurationError(
-                f"Service on '{self.group}': ip_suffix must be 2..254"
-            )
+            raise ConfigurationError(f"Service on '{self.group}': ip_suffix must be 2..254")
         lo, hi = self.dhcp_range
         if not (2 < lo < hi <= 254):
-            raise ConfigurationError(
-                f"Service on '{self.group}': dhcp_range must satisfy "
-                f"2 < lo < hi <= 254"
-            )
+            raise ConfigurationError(f"Service on '{self.group}': dhcp_range must satisfy 2 < lo < hi <= 254")
 
 
 @dataclass
@@ -127,6 +114,7 @@ class LabTopology:
                 raise ConfigurationError(f"Duplicate group name: '{spec.name}'")
             names.add(spec.name)
             subnets.append(IPv4Network(spec.subnet, strict=False))
+            
         for i in range(len(subnets)):
             for j in range(i + 1, len(subnets)):
                 if subnets[i].overlaps(subnets[j]):
@@ -134,6 +122,7 @@ class LabTopology:
                         f"Groups '{self.groups[i].name}' and "
                         f"'{self.groups[j].name}' have overlapping subnets"
                     )
+                    
         router_names: set[str] = set()
         for r in self.routers:
             r.validate()
@@ -142,15 +131,20 @@ class LabTopology:
             router_names.add(r.name)
             for g in r.connects:
                 if g not in names:
+                    raise ConfigurationError(f"Router '{r.name}' connects to unknown group '{g}'")
+                
+                # NEW: Prevent routers on ring topologies (Crucial Check)
+                g_spec = self.group(g)
+                if g_spec.topology == TopologyType.RING:
                     raise ConfigurationError(
-                        f"Router '{r.name}' connects to unknown group '{g}'"
+                        f"Router '{r.name}' cannot connect to Ring group '{g}'. "
+                        f"Routers need a single broadcast domain. Change group '{g}' to 'switch'."
                     )
+                    
         for s in self.services:
             s.validate()
             if s.group not in names:
-                raise ConfigurationError(
-                    f"Service references unknown group '{s.group}'"
-                )
+                raise ConfigurationError(f"Service references unknown group '{s.group}'")
 
     def group(self, name: str) -> GroupSpec:
         for spec in self.groups:
@@ -189,9 +183,7 @@ def load_topology(path: str | Path) -> LabTopology:
         with open(path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
     except (OSError, yaml.YAMLError) as exc:
-        raise ConfigurationError(
-            f"Cannot read topology file '{path}': {exc}"
-        ) from exc
+        raise ConfigurationError(f"Cannot read topology file '{path}': {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigurationError("Topology file must contain a mapping")
     topo = LabTopology(

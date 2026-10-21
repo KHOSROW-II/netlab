@@ -1,0 +1,24 @@
+name: smart-city
+groups:
+  - name: Traffic_Cameras
+    subnet: 172.20.1.0/24
+    host_count: 12
+    topology: switch
+  - name: Street_Lights
+    subnet: 172.20.2.0/24
+    host_count: 15
+    topology: hub
+  - name: Public_WiFi
+    subnet: 172.20.3.0/24
+    host_count: 8
+    topology: access_point
+  - name: City_Backbone
+    subnet: 172.20.0.0/24
+    host_count: 2
+routers:
+  - name: Traffic_Router
+    connects: [Traffic_Cameras, City_Backbone]
+  - name: Light_Router
+    connects: [Street_Lights, City_Backbone]
+  - name: WiFi_Router
+    connects: [Public_WiFi, City_Backbone]

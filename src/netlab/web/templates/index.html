@@ -1,117 +1,139 @@
 {% extends "base.html" %}
 {% block content %}
 
+<!-- ========================================== -->
+<!-- VIEW 1: EDITOR                             -->
+<!-- ========================================== -->
 <section id="view-editor" class="view active">
-  <div class="toolbar">
-    <button id="ed-add-group" class="btn btn-primary">+ Group</button>
-    <button id="ed-add-router" class="btn">+ Router</button>
-    <button id="ed-add-service" class="btn">+ Service</button>
-    <span class="toolbar-sep"></span>
-    <button id="ed-delete" class="btn btn-danger">Delete</button>
-    <button id="ed-connect" class="btn" title="Click node A, then node B to connect">Connect</button>
-    <span class="toolbar-sep"></span>
-    <button id="ed-save" class="btn">Save YAML</button>
-    <button id="ed-deploy" class="btn btn-primary">Deploy</button>
-    <button id="ed-force-deploy" class="btn btn-warn">Force deploy</button>
-    <span class="toolbar-sep"></span>
-    <select id="ed-load" class="input input-sm">
-      <option value="">Load…</option>
-      {% for t in topologies %}
-        <option value="{{ t.path }}">{{ t.name }}</option>
-      {% endfor %}
-    </select>
-    <span class="toolbar-spacer"></span>
-    <button id="ed-zoom-out" class="btn btn-sm" title="Zoom out">−</button>
-    <button id="ed-zoom-reset" class="btn btn-sm" title="Reset zoom">1:1</button>
-    <button id="ed-zoom-in" class="btn btn-sm" title="Zoom in">+</button>
-    <input id="ed-name" class="input input-sm" type="text"
-           placeholder="cluster name" value="netlab-editor">
+  <div class="editor-palette">
+    <div class="palette-category">Devices</div>
+    <div class="palette-item" draggable="true" data-type="pc">
+      <svg viewBox="0 0 24 24" class="palette-icon"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>PC
+    </div>
+    <div class="palette-item" draggable="true" data-type="server">
+      <svg viewBox="0 0 24 24" class="palette-icon"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><circle cx="7" cy="7" r="1" fill="currentColor"/><circle cx="7" cy="17" r="1" fill="currentColor"/></svg>Server
+    </div>
+    <div class="palette-item" draggable="true" data-type="switch">
+      <svg viewBox="0 0 24 24" class="palette-icon"><rect x="2" y="8" width="20" height="8" rx="2"/><path d="M6 12h2m2 0h2m2 0h2"/></svg>Switch
+    </div>
+    <div class="palette-item" draggable="true" data-type="router">
+      <svg viewBox="0 0 24 24" class="palette-icon"><circle cx="12" cy="12" r="9"/><path d="M8 12h8m-4-4v8"/></svg>Router
+    </div>
+    <div class="palette-item" draggable="true" data-type="hub">
+      <svg viewBox="0 0 24 24" class="palette-icon"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>Hub
+    </div>
+    <div class="palette-divider"></div>
+    <div class="palette-item tool-item" id="tool-cable">
+      <svg viewBox="0 0 24 24" class="palette-icon"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Cable
+    </div>
   </div>
-  <div class="editor-body">
-    <svg id="editor-svg" viewBox="0 0 1200 720" preserveAspectRatio="xMinYMin meet"></svg>
-    <aside id="editor-props" class="props">
-      <p class="muted">Select a node or add a new one.</p>
-    </aside>
+
+  <div class="editor-main">
+    <div class="toolbar">
+      <select id="ed-load" class="input input-sm">
+        <option value="">Load Scenario...</option>
+        {% for t in topologies %}
+          <option value="{{ t.path }}">{{ t.name }}</option>
+        {% endfor %}
+      </select>
+      <span class="toolbar-sep"></span>
+      <button id="ed-deploy" class="btn btn-primary">Deploy</button>
+      <span class="toolbar-spacer"></span>
+      <button id="ed-zoom-out" class="btn btn-sm">−</button>
+      <button id="ed-zoom-reset" class="btn btn-sm">1:1</button>
+      <button id="ed-zoom-in" class="btn btn-sm">+</button>
+      <span class="panel-hint" id="editor-status" style="margin-left:12px;">Ready.</span>
+    </div>
+    
+    <div class="editor-body" id="canvas-container">
+      <svg id="editor-svg" viewBox="0 0 1200 720" preserveAspectRatio="xMinYMin meet"></svg>
+      <div id="context-menu" class="context-menu" hidden>
+        <div class="ctx-item" id="ctx-connect">Start Cable Here</div>
+        <div class="ctx-divider"></div>
+        <div class="ctx-item" id="ctx-delete" style="color:#f85149">Delete Device</div>
+      </div>
+      <aside id="editor-props" class="props">
+        <p class="muted">Drag a device from the left palette or load a scenario.</p>
+      </aside>
+    </div>
   </div>
-  <div id="editor-status" class="statusbar">Ready.</div>
 </section>
 
+<!-- ========================================== -->
+<!-- VIEW 2: MONITOR                            -->
+<!-- ========================================== -->
 <section id="view-monitor" class="view">
   <div class="toolbar">
-    <button id="mon-refresh" class="btn">Refresh</button>
-    <button id="mon-validate" class="btn btn-primary"
-            title="Ping every pair on every network — real test">
-      Validate
-    </button>
-    <button id="mon-destroy" class="btn btn-danger">Destroy cluster</button>
+    <button id="mon-refresh" class="btn btn-sm">Refresh</button>
+    <button id="mon-destroy" class="btn btn-sm btn-danger">Destroy</button>
+    <span class="toolbar-sep"></span>
+    <button id="traffic-global-start" class="btn btn-sm btn-primary" title="Ping all gateways">Global Start</button>
+    <button id="traffic-global-stop" class="btn btn-sm btn-danger" title="Stop all pings">Stop All</button>
     <span class="toolbar-sep"></span>
     <button id="mon-zoom-out" class="btn btn-sm">−</button>
     <button id="mon-zoom-reset" class="btn btn-sm">1:1</button>
     <button id="mon-zoom-in" class="btn btn-sm">+</button>
+    <button id="mon-fullscreen" class="btn btn-sm" title="Toggle Fullscreen">⛶</button>
     <span class="toolbar-spacer"></span>
-    <span class="panel-hint">click node · click edge · drag · scroll to zoom</span>
   </div>
+  
   <div class="monitor-body">
     <aside id="monitor-netlist" class="netlist">
-      <p class="muted" style="padding: 12px; font-size: 12px;">loading…</p>
+      <p class="muted" style="padding:12px;font-size:12px;">Loading...</p>
     </aside>
-    <svg id="monitor-svg" viewBox="0 0 1400 720"
-         preserveAspectRatio="xMinYMin meet"></svg>
+    <svg id="monitor-svg" viewBox="0 0 1400 720" preserveAspectRatio="xMinYMin meet"></svg>
     <aside id="monitor-props" class="props">
       <p class="muted">Deploy a cluster first.</p>
     </aside>
   </div>
 </section>
 
+<!-- ========================================== -->
+<!-- VIEW 3: CALCULATOR                         -->
+<!-- ========================================== -->
 <section id="view-calculator" class="view">
   <div class="toolbar">
     <input id="calc-ip" class="input mono" placeholder="192.168.1.10">
-    <input id="calc-subnet" class="input mono"
-           placeholder="/24 or 255.255.255.0">
-    <button id="calc-analyze" class="btn btn-primary">Analyze</button>
-    <span class="toolbar-spacer"></span>
-    <span class="panel-hint">IP address analysis</span>
+    <input id="calc-subnet" class="input mono" placeholder="/24">
+    <button id="calc-analyze" class="btn btn-primary btn-sm">Analyze</button>
   </div>
   <div class="calc-body">
-    <div id="calc-result" class="calc-panel">
-      <p class="muted">Enter an IP address and click Analyze.</p>
-    </div>
-  </div>
-  <div class="toolbar">
-    <input id="calc-split-subnet" class="input mono"
-           placeholder="subnet to split (10.0.0.0/16)">
-    <select id="calc-split-mode" class="input input-sm">
-      <option value="count">split by count</option>
-      <option value="prefix">split by prefix</option>
-    </select>
-    <input id="calc-split-value" class="input input-sm" type="number"
-           placeholder="4 or 26">
-    <button id="calc-split" class="btn">Split</button>
-    <span class="toolbar-spacer"></span>
-    <span class="panel-hint">subnet splitting</span>
-  </div>
-  <div class="calc-body">
-    <div id="calc-split-result" class="calc-panel">
-      <p class="muted">Enter a subnet and split parameters.</p>
-    </div>
+    <div id="calc-result" class="calc-panel"><p class="muted">Enter an IP address and subnet mask to analyze.</p></div>
   </div>
 </section>
 
+<!-- ========================================== -->
+<!-- VIEW 4: TERMINAL                           -->
+<!-- ========================================== -->
 <section id="view-terminal" class="view">
   <div class="toolbar">
-    <select id="term-host" class="input" size="1"></select>
-    <input id="term-cmd" class="input mono" type="text"
-           placeholder="ping -c 2 10.30.0.20"
-           value="ping -c 2 10.30.0.20">
+    <select id="term-host" class="input"></select>
+    <input id="term-cmd" class="input mono" value="ping -c 2 10.30.0.20">
     <button id="term-run" class="btn btn-primary">Run</button>
   </div>
   <pre id="term-output" class="log tall"></pre>
 </section>
 
+<!-- ========================================== -->
+<!-- VIEW 5: SETTINGS                           -->
+<!-- ========================================== -->
+<section id="view-settings" class="view">
+  <div class="toolbar">
+    <button id="set-refresh" class="btn btn-sm">Refresh Settings</button>
+    <span class="panel-hint">Configure IPs and view status without terminal</span>
+  </div>
+  <div class="settings-body" id="settings-list">
+    <p class="muted" style="padding:20px;">Deploy a cluster to view settings.</p>
+  </div>
+</section>
+
+<!-- ========================================== -->
+<!-- VIEW 6: DIAGNOSTICS                        -->
+<!-- ========================================== -->
 <section id="view-diagnostics" class="view">
   <div class="toolbar">
-    <button id="diag-check" class="btn">Check</button>
-    <button id="diag-fix" class="btn btn-primary">Check &amp; Fix</button>
+    <button id="diag-check" class="btn btn-sm">Check</button>
+    <button id="diag-fix" class="btn btn-sm btn-primary">Check & Fix</button>
   </div>
   <pre id="diag-output" class="log tall"></pre>
 </section>

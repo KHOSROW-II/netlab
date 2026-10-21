@@ -1,0 +1,15 @@
+name: retail-store
+groups:
+  - name: POS_Terminals
+    subnet: 192.168.1.0/25
+    host_count: 5
+  - name: Management
+    subnet: 192.168.1.128/25
+    host_count: 3
+  - name: Guest_WiFi
+    subnet: 10.0.0.0/24
+    host_count: 4
+    topology: access_point
+routers:
+  - name: Store_Router
+    connects: [POS_Terminals, Management, Guest_WiFi]

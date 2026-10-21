@@ -7,7 +7,6 @@
   <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
-  <!-- SPLASH SCREEN -->
   <div id="splash-screen">
     <div class="splash-logo">◉</div>
     <h1 class="splash-title">NetLab</h1>
@@ -25,6 +24,8 @@
           <span class="brand-version">v{{ version }}</span>
         </div>
       </div>
+      
+      <!-- Navigation Menu -->
       <nav class="nav">
         <a class="nav-item active" data-view="editor">
           <span class="nav-icon">◆</span><span>Editor</span>
@@ -38,10 +39,14 @@
         <a class="nav-item" data-view="terminal">
           <span class="nav-icon">▶</span><span>Terminal</span>
         </a>
+        <a class="nav-item" data-view="settings">
+          <span class="nav-icon">⚙</span><span>Settings</span>
+        </a>
         <a class="nav-item" data-view="diagnostics">
           <span class="nav-icon">?</span><span>Diagnostics</span>
         </a>
       </nav>
+
       <div class="sidebar-footer">
         <span id="topbar-status" class="status-pill">no cluster</span>
         <div class="branding">
@@ -50,15 +55,21 @@
         </div>
       </div>
     </aside>
+
     <main class="content">
+      <!-- Routing Banner (Shows on top of everything) -->
       <div id="routing-banner" class="banner banner-warn" hidden>
         <span id="routing-banner-text" class="banner-text">Routing disabled</span>
         <button id="routing-banner-fix" class="btn btn-sm">Try fix</button>
         <button id="routing-banner-dismiss" class="btn btn-sm btn-ghost">Dismiss</button>
       </div>
+      
+      <!-- Content injection point -->
       {% block content %}{% endblock %}
     </main>
   </div>
+
+  <!-- Scripts loaded at the end -->
   <script src="/static/js/app.js"></script>
   <script src="/static/js/editor.js"></script>
   <script src="/static/js/monitor.js"></script>

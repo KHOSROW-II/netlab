@@ -1,0 +1,22 @@
+name: industrial-ot
+groups:
+  - name: PLC_Zone
+    subnet: 10.60.1.0/24
+    host_count: 6
+    topology: ring
+  - name: SCADA_Zone
+    subnet: 10.60.2.0/24
+    host_count: 4
+  - name: Corporate_Zone
+    subnet: 10.60.3.0/24
+    host_count: 5
+  - name: DMZ_Firewall_Link
+    subnet: 10.60.0.0/24
+    host_count: 1
+routers:
+  - name: PLC_Router
+    connects: [PLC_Zone, DMZ_Firewall_Link]
+  - name: SCADA_Router
+    connects: [SCADA_Zone, DMZ_Firewall_Link]
+  - name: Corp_Router
+    connects: [Corporate_Zone, DMZ_Firewall_Link]

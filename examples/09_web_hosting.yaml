@@ -1,0 +1,22 @@
+name: web-hosting
+groups:
+  - name: Client_A_Servers
+    subnet: 10.20.1.0/24
+    host_count: 4
+    topology: switch
+  - name: Client_B_Servers
+    subnet: 10.20.2.0/24
+    host_count: 4
+    topology: switch
+  - name: Shared_Storage
+    subnet: 10.20.3.0/24
+    host_count: 3
+    topology: switch
+  - name: Hosting_Backbone
+    subnet: 10.20.0.0/24
+    host_count: 2
+routers:
+  - name: ClientA_Router
+    connects: [Client_A_Servers, Shared_Storage, Hosting_Backbone]
+  - name: ClientB_Router
+    connects: [Client_B_Servers, Shared_Storage, Hosting_Backbone]
